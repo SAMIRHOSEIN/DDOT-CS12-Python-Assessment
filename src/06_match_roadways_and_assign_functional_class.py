@@ -1,32 +1,19 @@
 # %% STEP 1 - Settings and libraries
-"""DDOT CS-12 | Step 06 (v2): LRS-first roadway and FHWA class matching.
+"""DDOT CS-12 | Final roadway matching and FHWA functional class assignment.
 
-Run from a repository with this structure:
+Run from the project with:
     src/06_match_roadways_and_assign_functional_class.py
     data/processed/permits_2026_applied_or_issued_staging_crane_three_utilities.json
 
-Main principles
----------------
-1. Identical Original / OnSeg: inspect OnSeg once.
-2. Different Original / OnSeg: inspect BOTH, regardless of separation.
-3. LRS proposes SubBlockKeys. Layer 162 provides official FHWA classes.
-4. Validate street, quadrant, COMPLETE address ranges, roadway type and
-   whether the address-matching road is the nearest reported LRS roadway.
-5. Allow a verified CLASS with multiple valid SubBlockKeys, but do not invent
-   a unique key. Keep every candidate and the reason for any uncertainty.
-6. Special bridge addresses are handled explicitly, but are never silently
-   treated as a verified street address.
+One row is evaluated per TOPS LocationID. For identical Original/OnSeg points,
+query OnSeg once; for different points, query both. LRS provides candidate
+SubBlockKeys and the official roadway layer provides FHWA functional classes.
+Street names, address ranges, road type and spatial agreement are checked.
+Uncertain results are RETAINED and clearly labeled, never silently discarded.
 
-Search radii (75 m and, when needed, 200 m) determine which candidates LRS
-returns. They are NOT thresholds for treating Original / OnSeg as identical,
-or for automatically accepting a candidate roadway.
-
-A known source limitation: TOPS local XY is interpreted as EPSG:26985 based on
-Step 05 QA. Confirm against official TOPS metadata before final submission.
-
-Dependencies: pandas, requests, pyproj. Start with RUN_MODE='extended', then 'full'.
-The standard-library SQLite API cache makes large runs resumable without rewriting
-a huge JSON file; existing v2 raw responses are imported automatically.
+Requirements: pandas, requests, pyproj. Run the full dataset with this script.
+TOPS XY is interpreted as EPSG:26985 based on earlier spatial QA; this is a
+working interpretation, not a confirmed TOPS metadata field definition.
 """
 
 import json
@@ -42,25 +29,20 @@ from pyproj import Transformer
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# CHOOSE ONE MODE: 'pilot' (18 rows), 'extended' (~150 rows), or 'full' (all rows).
-RUN_MODE = 'full'                 # After checking extended, change to 'full'.
+RUN_MODE = 'full'  # 'pilot' or 'full'
 PILOT_PER_COMPANY_PER_GROUP = 3
-EXTENDED_PER_COMPANY_PER_GROUP = 25   # 25 x 3 utilities x 2 coordinate groups ~= 150
-RANDOM_SEED = 20261014                # Reproducible extended selection
-LRS_SEARCH_RADII_METERS = (75, 200)   # Search windows only, NOT acceptance thresholds
-REQUEST_PAUSE_SECONDS = 0.10
-SAVE_EVERY = 20                       # Save result/audit CSVs every 20 new locations
-MAX_CONSECUTIVE_API_ERRORS = 5        # Stop if the DDOT services appear unavailable
-USE_PREVIOUS_RAW_API_CACHE = True     # Reuse raw DDOT replies, NEVER old class decisions
 
-VERSION = 'v2'
+LRS_SEARCH_RADII_METERS = (75, 200)  # Candidate search windows, NOT match thresholds.
+REQUEST_PAUSE_SECONDS = 0.10
+SAVE_EVERY = 50
+MAX_CONSECUTIVE_API_ERRORS = 5
+IMPORT_EXISTING_RAW_API_CACHE = True  # Only raw API replies, never old match results.
+
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path.cwd()
 INPUT = ROOT / 'data' / 'processed' / 'permits_2026_applied_or_issued_staging_crane_three_utilities.json'
-OUT = ROOT / 'outputs' / 'roadway_matching_lrs_v2'
-OUT.mkdir(parents=True, exist_ok=True)
-CACHE_DB_PATH = OUT / 'api_cache_lrs_v2.sqlite3'
-LEGACY_V2_CACHE_PATH = OUT / 'api_cache_lrs_v2.json'
-PREVIOUS_CACHE_PATH = ROOT / 'outputs' / 'roadway_matching_lrs' / 'api_cache_lrs_first.json'
+BASE_OUT = ROOT / 'outputs' / 'roadway_functional_class'
+OUT = BASE_OUT / RUN_MODE
+CACHE_DB_PATH = BASE_OUT / 'ddot_lrs_raw_api_cache.sqlite3'
 
 LRS_URL = ('https://rh.dcgis.dc.gov/dcgis/rest/services/DDOT/'
            'RoadwayBlocks/MapServer/exts/DdotLrsExtensions/getPointOnSubBlock')
@@ -75,15 +57,10 @@ session.mount('https://', HTTPAdapter(max_retries=Retry(
     total=3, backoff_factor=0.8, status_forcelist=(429, 500, 502, 503, 504),
     allowed_methods=frozenset(('GET', 'POST')))))
 
-# DDOT documentation confirms Theodore Roosevelt Bridge carries Interstate 66.
-# A route alias is not sufficient to establish the precise permit location.
+# A recognized bridge route alias does not prove the permit's exact bridge segment.
 SPECIAL_ROUTE_ALIASES = {'ROOSEVELT BRIDGE': 'INTERSTATE 66',
                          'THEODORE ROOSEVELT BRIDGE': 'INTERSTATE 66'}
-
-# QA warning, NOT an automatic distance rejection threshold. A typical
-# hundred-block spans at most a few hundred address numbers; a returned
-# '4280 - 45099' range is suspicious and must be manually reviewed.
-SUSPICIOUS_LRS_ADDRESS_SPAN = 1000
+SUSPICIOUS_LRS_ADDRESS_SPAN = 1000  # Flag implausible address ranges for review.
 
 
 # %% STEP 2 - Load the permit-location records
@@ -154,15 +131,57 @@ def normalize_street(text):
     return ' '.join(ABBREVIATIONS.get(word, word) for word in words)
 
 
+CAPITOL_STREETS = {'EAST CAPITOL ST', 'NORTH CAPITOL ST', 'SOUTH CAPITOL ST'}
+
+
+def canonical_road_name(name):
+    """Normalize DDOT route labels without globally discarding direction labels.
+
+    DDOT labels EAST/NORTH/SOUTH CAPITOL ST 'BN' (both directions); TOPS often
+    calls the SAME route EAST/NORTH/SOUTH CAPITOL STREET. Only these exact three
+    route labels are allowed this alias. E.g. 'INTERSTATE 66 BN' is NOT stripped.
+    """
+    name = normalize_street(name)
+    if name.endswith(' BN') and name[:-3] in CAPITOL_STREETS:
+        return name[:-3]
+    return name
+
 
 def route_matches_permit(route_name, permit):
-    """Exact regular street matching; cautious special-bridge I-66 alias."""
-    candidate = normalize_street(route_name)
+    """Conservative road-name matching, including two named intersection streets."""
+    candidate = canonical_road_name(route_name)
     if permit['type'] == 'special' and permit['street'] == 'INTERSTATE 66':
-        # DDOT uses 'INTERSTATE 66   BN' in the real Roosevelt Bridge
-        # pilot response; preserve the suffix and only match the I-66 corridor.
         return candidate == 'INTERSTATE 66' or candidate.startswith('INTERSTATE 66 ')
+    if permit['type'] == 'intersection':
+        return candidate in permit['streets']
     return bool(candidate and candidate == permit['street'])
+
+
+def parse_intersection_address(text):
+    """Parse two plain named streets only; never mistake ramps/exits for crossings.
+
+    Examples: 'HOLBROOK STREET NE AND MORSE STREET NE',
+              'C STREET SW AND SOUTH CAPITOL STREET'.
+    Exact matched names are later cross-checked against DDOT LRS and layer 162.
+    """
+    raw = re.sub(r'\s+', ' ', text.strip().upper()) if isinstance(text, str) else ''
+    if raw.count(' AND ') != 1:
+        return None
+    left, right = (part.strip() for part in raw.split(' AND ', 1))
+    # Ramps, directional movements, exits and 'from/to' are NOT street crossings.
+    prohibited = {'RAMP', 'EXIT', 'NORTHBOUND', 'SOUTHBOUND',
+                  'EASTBOUND', 'WESTBOUND', 'FROM', 'TO', 'INTERSTATE'}
+    if not left or not right or any(word in prohibited for word in
+                                  set(re.sub(r'[^A-Z0-9 ]', ' ', raw).split())):
+        return None
+    a, b = canonical_road_name(left), canonical_road_name(right)
+    # Allow ordinal road names (1ST ST), reject house-number-like prefixes.
+    road_ending = re.compile(r'\b(ST|AVE|RD|PL|BLVD|DR|LN|CT|CIR|TER|PKWY|HWY)\b')
+    if (not a or not b or a == b or
+            not road_ending.search(a) or not road_ending.search(b)):
+        return None
+    return {'raw': raw, 'type': 'intersection', 'street': a + ' & ' + b,
+            'streets': (a, b), 'start': None, 'end': None}
 
 
 def parse_address(text, allow_implausible=False):
@@ -175,6 +194,9 @@ def parse_address(text, allow_implausible=False):
     """
     raw = text.strip().upper() if isinstance(text, str) else ''
     raw = re.sub(r'\s+', ' ', raw)
+    intersection = parse_intersection_address(raw)
+    if intersection is not None:
+        return intersection
     if raw in SPECIAL_ROUTE_ALIASES:
         return {'raw': raw, 'type': 'special', 'street': SPECIAL_ROUTE_ALIASES[raw],
                 'start': None, 'end': None}
@@ -214,7 +236,7 @@ def block_relation(permit, unit_block):
         return 'suspicious_range', a, b
     if permit['type'] != 'regular':
         return 'unknown', a, b
-    if lrs['street'] != permit['street']:
+    if canonical_road_name(lrs['street']) != canonical_road_name(permit['street']):
         return 'different_street', a, b
     p, q = permit['start'], permit['end']
     overlap_start, overlap_end = max(a, p), min(b, q)
@@ -252,7 +274,7 @@ def covers_entire_range(permit, intervals):
     return False
 
 
-# %% STEP 4 - DDOT LRS requests and exact SubBlockKey lookup
+# %% STEP 4 - DDOT LRS and official roadway data
 
 def post_json(url, parameters):
     response = session.post(url, data={'f': 'json', **parameters}, timeout=60)
@@ -265,32 +287,52 @@ def post_json(url, parameters):
 
 
 class SQLiteResponseCache:
-    """Keep raw DDOT JSON replies across runs without large repeated JSON writes.
+    """Store raw DDOT API responses for reliable, resumable full-data runs.
 
-    No outside package needed: sqlite3 is part of standard Python.
-    Old raw v1/v2 cache files are imported once when creating the database.
+    On a new run, optionally import compatible raw responses from other output
+    folders. Never import previous location matches, classifications or CSVs.
     """
 
-    def __init__(self, path, seed_paths):
-        fresh = not path.exists()
+    def __init__(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new_database = not path.exists()
         self.connection = sqlite3.connect(path, timeout=30)
         self.connection.execute('PRAGMA journal_mode=WAL')
         self.connection.execute('CREATE TABLE IF NOT EXISTS replies ('
                                 'request_key TEXT PRIMARY KEY, payload_json TEXT NOT NULL)')
-        if fresh:
-            for seed_path in seed_paths:
-                if not seed_path.exists():
-                    continue
-                with seed_path.open(encoding='utf-8') as file:
-                    raw_replies = json.load(file)
-                if not isinstance(raw_replies, dict):
-                    raise ValueError(f'Unexpected cache content: {seed_path}')
-                self.connection.executemany(
-                    'INSERT OR IGNORE INTO replies(request_key, payload_json) VALUES (?, ?)',
-                    ((key, json.dumps(value, ensure_ascii=False))
-                     for key, value in raw_replies.items()))
-                self.connection.commit()
-                print(f'Imported {len(raw_replies)} raw API cache entries from {seed_path.name}')
+        self.connection.commit()
+        if new_database and IMPORT_EXISTING_RAW_API_CACHE:
+            self.import_existing(path)
+
+    def import_existing(self, destination):
+        folder = ROOT / 'outputs'
+        if not folder.exists():
+            return
+        sources = sorted((p for p in folder.rglob('*.sqlite3')
+                          if 'cache' in p.name.lower() and p.resolve() != destination.resolve()),
+                         key=lambda p: p.stat().st_size, reverse=True)
+        imported = 0
+        for source in sources:
+            try:
+                with sqlite3.connect(source) as old:
+                    table = old.execute("SELECT name FROM sqlite_master "
+                                        "WHERE type='table' AND name='replies'").fetchone()
+                    if not table:
+                        continue
+                    cursor = old.execute('SELECT request_key, payload_json FROM replies')
+                    while True:
+                        batch = cursor.fetchmany(500)
+                        if not batch:
+                            break
+                        self.connection.executemany(
+                            'INSERT OR IGNORE INTO replies VALUES (?, ?)', batch)
+                    self.connection.commit()
+                imported += 1
+            except (OSError, sqlite3.Error) as exc:
+                print(f'Raw API cache import skipped for {source.name}: {exc}')
+        if imported:
+            count = self.connection.execute('SELECT COUNT(*) FROM replies').fetchone()[0]
+            print(f'Reused {count:,} raw DDOT API responses from {imported} existing cache(s).')
 
     def __contains__(self, key):
         return self.connection.execute(
@@ -307,25 +349,19 @@ class SQLiteResponseCache:
         self.connection.execute(
             'INSERT OR REPLACE INTO replies(request_key, payload_json) VALUES (?, ?)',
             (key, json.dumps(payload, ensure_ascii=False)))
-        self.connection.commit()  # A successful request survives an interrupted run.
+        self.connection.commit()  # Survives a canceled run.
 
     def close(self):
         self.connection.close()
-
-
-def load_cache():
-    sources = ([PREVIOUS_CACHE_PATH, LEGACY_V2_CACHE_PATH]
-               if USE_PREVIOUS_RAW_API_CACHE else [])
-    return SQLiteResponseCache(CACHE_DB_PATH, sources)
-
-
-api_cache = None  # Loaded when executing main(); easy to mock in tests.
 
 
 def cache_request(key, function):
     if key not in api_cache:
         api_cache[key] = function()
     return api_cache[key]
+
+
+api_cache = None
 
 
 def lrs_query(x, y, radius):
@@ -449,6 +485,8 @@ def valid_official_address_match(lrs, permit):
     return (str(official.get('ROADTYPE', '')).strip() == '1'
             and route_matches_permit(official.get('ROUTENAME'), permit)
             and route_matches_permit(lrs.get('LRS_RouteName'), permit)
+            and canonical_road_name(official.get('ROUTENAME')) ==
+                canonical_road_name(lrs.get('LRS_RouteName'))
             and valid_class)
 
 
@@ -471,6 +509,9 @@ def classify_location(rec):
         'UtilityCompany': rec.get('UtilityCompany'),
         'WorkLocationFullAddress': rec.get('WorkLocationFullAddress'),
         'CoordinateGroup': rec['CoordinateGroup'],
+        'AddressType': permit['type'],
+        'IntersectionStreet1': (permit['streets'][0] if permit['type'] == 'intersection' else ''),
+        'IntersectionStreet2': (permit['streets'][1] if permit['type'] == 'intersection' else ''),
         'ParsedStreet': permit['street'],
         'PermitAddressStart': permit['start'],
         'PermitAddressEnd': permit['end'],
@@ -484,7 +525,6 @@ def classify_location(rec):
         'NearestRoadway_Original': '',
         'ClassReviewNeeded': True,
         'SubBlockReviewNeeded': True,
-        'NeedsManualReview': True,
         'Explanation': '',
         'OnSeg_ValidCandidates': 0,
         'Original_ValidCandidates': 0,
@@ -517,7 +557,8 @@ def classify_location(rec):
             lrs_name = normalize_street(c['LRS_RouteName'])
             street_ok = bool(permit['street'] and
                              route_matches_permit(official_name, permit) and
-                             route_matches_permit(lrs_name, permit))
+                             route_matches_permit(lrs_name, permit) and
+                             canonical_road_name(official_name) == canonical_road_name(lrs_name))
             street_type_ok = (str(official.get('ROADTYPE', '')).strip() == '1'
                               and str(c.get('LRS_RouteType', '')).lower() == 'street')
             clazz = as_int_class(official.get('FHWAFUNCTIONALCLASS'))
@@ -527,7 +568,7 @@ def classify_location(rec):
             block_strong = relation in STRONG_BLOCK_RELATIONS
             # Do not auto accept partial/boundary-only matches or bad LRS ranges.
             address_ok = base_ok and (block_strong if permit['type'] == 'regular'
-                                      else permit['type'] == 'special')
+                                      else permit['type'] in ('special', 'intersection'))
             audit = {
                 'LocationID': rec['LocationID'], 'CoordinateSource': side,
                 'LRS_SearchRadius_m': c['LRS_SearchRadius_m'],
@@ -538,6 +579,7 @@ def classify_location(rec):
                 'OfficialRouteName': official.get('ROUTENAME'),
                 'OfficialRoadType': official.get('ROADTYPE'),
                 'OfficialFHWAClass': clazz,
+                'AddressType': permit['type'],
                 'StreetMatchesPermit': street_ok,
                 'BlockRelation': relation,
                 'LRSBlockStart': a, 'LRSBlockEnd': b,
@@ -557,6 +599,9 @@ def classify_location(rec):
         result.update(MatchStatus='UNPARSEABLE_ADDRESS',
                       Explanation='Special or unsupported address needs external location verification.')
         return result, audits
+
+    if permit['type'] == 'intersection':
+        return classify_intersection(result, audits, sources, permit)
 
     eligible = [a for a in audits if a['EligibleAddressBlockClass']]
     # Deduplicate repeated key from different coordinate sources.
@@ -608,7 +653,6 @@ def classify_location(rec):
     # Closest LRS roadway to EACH distinct coordinate must also match the
     # official permit street, full address block, and class. This RELATIVE
     # nearest-road check avoids arbitrary distance-to-road acceptance cutoffs.
-    anchored_sides = []
     for side in sources:
         nearest = anchors[side]
         if not nearest or not any(a['SpatiallyAnchored'] for a in nearest):
@@ -628,9 +672,8 @@ def classify_location(rec):
                           Explanation=f'Nearest {side} candidate has conflicting class.')
             result['FunctionalClass'] = None
             return result, audits
-        anchored_sides.append(side)
 
-    # No unresolved competing boundary/partial block with a DIFFERENT class.
+    # Do not auto-accept a conflicting nearby block with another class.
     weak_competitors = [a for a in audits
                         if a['OfficialStreetAndClassValid'] and
                         a['BlockRelation'] in WEAK_BLOCK_RELATIONS and
@@ -641,7 +684,6 @@ def classify_location(rec):
         return result, audits
 
     result.update(ClassStatus='VERIFIED', ClassReviewNeeded=False,
-                  NeedsManualReview=False,
                   MatchStatus=('VERIFIED_UNIQUE_KEY' if len(valid_keys) == 1
                                else 'VERIFIED_MULTIPLE_KEYS'),
                   Explanation=('Street/quadrant, full address range, nearest-point LRS '
@@ -656,71 +698,167 @@ def classify_location(rec):
     return result, audits
 
 
-# %% STEP 6 - Run pilot/full, resume safely, write auditable CSVs
+def classify_intersection(result, audits, sources, permit):
+    """Classify a 2-road intersection only on demonstrable LRS road agreement.
 
-def choose_records(df):
-    """Select a reproducible pilot, larger balanced sample, or the entire input.
-
-    The extended sample always contains the original three pilot locations in
-    each utility/coordinate group plus randomly chosen additional locations.
+    A complete intersection verification requires BOTH named roads to be among
+    the nearest LRS matches for each coordinate source, no unrelated tied
+    closest road, and the SAME official class across all nearest matches.
+    This avoids assigning the class of whichever street happens to be nearest.
+    If both roads are seen but are not both nearest, a unanimous class is only
+    PROVISIONAL because the exact crossing is not established.
     """
-    if RUN_MODE == 'full':
-        return df.sort_values('LocationID').reset_index(drop=True)
-    pieces = []
-    ordered = df.sort_values('LocationID')
-    for _, group in ordered.groupby(['UtilityCompany', 'CoordinateGroup'], sort=True):
-        first = group.head(PILOT_PER_COMPANY_PER_GROUP)
-        if RUN_MODE == 'pilot':
-            pieces.append(first)
-        else:
-            extra_count = max(0, EXTENDED_PER_COMPANY_PER_GROUP - len(first))
-            remaining = group.iloc[len(first):]
-            extra = remaining.sample(n=min(extra_count, len(remaining)),
-                                     random_state=RANDOM_SEED)
-            pieces.extend([first, extra])
-    return pd.concat(pieces, ignore_index=True).sort_values('LocationID').reset_index(drop=True)
+    named = set(permit['streets'])
+    eligible = [a for a in audits if a['EligibleAddressBlockClass']]
+    result['MatchedSubBlockKeys'] = '; '.join(sorted({
+        str(a['LRS_SubBlockKey']) for a in eligible
+    }))
+    for side in sources:
+        result[f'{side}_ValidCandidates'] = len({
+            a['LRS_SubBlockKey'] for a in eligible if a['CoordinateSource'] == side
+        })
+
+    # Consider the closest valid SubBlock of EACH named road for each point,
+    # without a distance cutoff. Preserve ALL alternatives in the audit CSV.
+    nearest_named = []
+    roads_found_each_side = True
+    verified_geometry = True
+    for side in sources:
+        side_rows = [a for a in audits if a['CoordinateSource'] == side]
+        finite = [a['LRS_OffsetMeters'] for a in side_rows
+                  if a['LRS_OffsetMeters'] is not None]
+        nearest_all = [a for a in side_rows if finite and
+                       a['LRS_OffsetMeters'] == min(finite)]
+        nearest_routes = {
+            canonical_road_name(a['OfficialRouteName'])
+            for a in nearest_all if a['EligibleAddressBlockClass']
+        }
+        if (nearest_routes != named or
+                any(not a['EligibleAddressBlockClass'] for a in nearest_all)):
+            verified_geometry = False
+
+        for street in permit['streets']:
+            matching = [a for a in side_rows if a['EligibleAddressBlockClass']
+                        and canonical_road_name(a['OfficialRouteName']) == street
+                        and a['LRS_OffsetMeters'] is not None]
+            if not matching:
+                roads_found_each_side = False
+                continue
+            nearest_street_offset = min(a['LRS_OffsetMeters'] for a in matching)
+            nearest_named.extend(a for a in matching
+                                 if a['LRS_OffsetMeters'] == nearest_street_offset)
+
+    if not roads_found_each_side:
+        result.update(MatchStatus='INTERSECTION_ROAD_MISSING_REVIEW',
+                      Explanation='LRS did not return an official-class road for both named streets at every point.')
+        return result, audits
+
+    class_set = {a['OfficialFHWAClass'] for a in nearest_named}
+    if len(class_set) != 1:
+        result.update(MatchStatus='INTERSECTION_CLASS_CONFLICT_REVIEW',
+                      Explanation='The two named intersection roads have different official FHWA classes.')
+        return result, audits
+
+    result['FunctionalClass'] = class_set.pop()
+    matched_near_keys = sorted({str(a['LRS_SubBlockKey']) for a in nearest_named})
+    result['MatchedSubBlockKeys'] = '; '.join(matched_near_keys)
+    result['SubBlockKeyStatus'] = ('UNIQUE_CANDIDATE' if len(matched_near_keys) == 1
+                                   else 'MULTIPLE_CANDIDATE_KEYS')
+    if not verified_geometry:
+        result.update(ClassStatus='PROVISIONAL',
+                      MatchStatus='INTERSECTION_CLASS_CONSENSUS_REVIEW',
+                      Explanation='Both named roads have the same class, but they are not both the nearest LRS roads at every point.')
+        return result, audits
+
+    result.update(ClassStatus='VERIFIED', ClassReviewNeeded=False,
+                  MatchStatus='VERIFIED_INTERSECTION_SAME_CLASS',
+                  Explanation='Both named intersecting roads are nearest LRS matches and have the same official FHWA class.')
+    result['SubBlockKeyStatus'] = 'VERIFIED_MULTIPLE'
+    result['SubBlockReviewNeeded'] = True  # Both streets have distinct subblocks.
+    return result, audits
 
 
-def write_csv_atomically(frame, destination):
-    """Prevent a partially written CSV if execution is interrupted mid-save."""
-    temporary = destination.with_name(destination.name + '.tmp')
+# %% STEP 6 - Process all permit locations and save final outputs
+
+REVIEW_ACTIONS = {
+    'SPATIAL_DISAGREEMENT_REVIEW': 'Compare TOPS coordinates, permit location details, and official roadway geometry.',
+    'NO_VALID_ADDRESS_BLOCK_MATCH': 'Inspect address spelling, LRS block range, and relevant roadway candidates.',
+    'INTERSECTION_CLASS_CONFLICT_REVIEW': 'Review which named intersection street contains the permitted work area.',
+    'INTERSECTION_CLASS_CONSENSUS_REVIEW': 'Check the exact intersection position; class agrees but geometry is ambiguous.',
+    'BOUNDARY_CLASS_CONFLICT': 'Inspect overlapping subblocks and functional class changes at the block boundary.',
+    'CONFLICTING_CLASSES': 'Identify the relevant subblock using permit details and roadway geometry.',
+    'UNPARSEABLE_ADDRESS': 'Inspect special ramp, exit, or unsupported address format manually.',
+    'SPECIAL_BRIDGE_REVIEW': 'Verify bridge location and roadway geometry before confirming class.',
+    'NEAREST_ROAD_TIE_REVIEW': 'Review equally close roadway candidates and exact permit position.',
+    'INTERSECTION_ROAD_MISSING_REVIEW': 'Check whether both named roads occur in official LRS candidates.',
+    'INCOMPLETE_BLOCK_COVERAGE': 'Check whether confirmed subblocks cover the complete permit address range.',
+    'SPATIAL_CLASS_CONFLICT': 'Check nearest-road evidence and conflicting official classes.',
+    'NO_LRS_CANDIDATES': 'Check coordinate validity and available DDOT roadway coverage.',
+    'MISSING_COORDINATES': 'Check or recover location coordinates in the source TOPS record.',
+    'API_ERROR': 'Retry the DDOT API request after checking service availability.',
+}
+
+RESULT_PATH = OUT / 'permit_locations_fhwa_functional_class.csv'
+CANDIDATE_PATH = OUT / 'permit_locations_lrs_roadway_candidate_evidence.csv'
+REVIEW_PATH = OUT / 'permit_locations_functional_class_needing_review.csv'
+ERROR_PATH = OUT / 'permit_locations_api_errors.csv'
+SUMMARY_PATH = OUT / 'roadway_matching_status_summary.csv'
+
+
+def save_csv(frame, path):
+    """Atomically replace a CSV so interruption does not corrupt saved work."""
+    temporary = path.with_name(path.name + '.tmp')
     frame.to_csv(temporary, index=False)
-    temporary.replace(destination)  # Close Excel before running on Windows.
+    temporary.replace(path)  # Close open Excel files before running on Windows.
 
 
 def main():
     global api_cache
-    if RUN_MODE not in ('pilot', 'extended', 'full'):
-        raise ValueError("RUN_MODE must be 'pilot', 'extended', or 'full'.")
+    OUT.mkdir(parents=True, exist_ok=True)
     df = read_permit_records(INPUT)
-    print('\n--- PERMIT COORDINATE GROUPS ---')
-    print(df['CoordinateGroup'].value_counts().to_string())
-    print('Total permit locations:', len(df))
-    coordinate_qa(df)
-    work = choose_records(df)
-    print(f'RUN_MODE: {RUN_MODE} | locations selected: {len(work)}')
-    print('Selection by utility and coordinate group:')
-    print(work.groupby(['UtilityCompany', 'CoordinateGroup']).size().to_string())
-    api_cache = load_cache()
 
-    results_path = OUT / f'permit_functional_class_lrs_{RUN_MODE}.csv'
-    candidate_path = OUT / f'lrs_roadway_candidates_{RUN_MODE}.csv'
-    review_path = OUT / f'lrs_records_needing_class_review_{RUN_MODE}.csv'
-    errors_path = OUT / f'lrs_api_errors_{RUN_MODE}.csv'
-    rows = []
-    candidate_rows = []
-    if results_path.exists():
-        rows = pd.read_csv(results_path, dtype={'LocationID': 'string'}).to_dict('records')
-    if candidate_path.exists():
-        candidate_rows = pd.read_csv(candidate_path, dtype={'LocationID': 'string'}).to_dict('records')
-    done = {str(row['LocationID']) for row in rows
-            if row.get('MatchStatus') != 'API_ERROR'}
-    print('Already completed from previous run:', len(done))
+    if RUN_MODE not in ('pilot', 'full'):
+        raise ValueError("RUN_MODE must be 'pilot' or 'full'.")
 
-    def save():
-        write_csv_atomically(pd.DataFrame(rows), results_path)
-        write_csv_atomically(pd.DataFrame(candidate_rows), candidate_path)
-        # Raw API results are already saved individually in SQLite.
+    if RUN_MODE == 'pilot':
+        work = (
+            df.sort_values('LocationID')
+            .groupby(['UtilityCompany', 'CoordinateGroup'], group_keys=False)
+            .head(PILOT_PER_COMPANY_PER_GROUP)
+            .reset_index(drop=True)
+        )
+    else:
+        work = df.sort_values('LocationID').reset_index(drop=True)
+
+
+    print('--- DDOT FUNCTIONAL CLASS MATCHING ---')
+    print('Total permit locations:', len(work))
+    print('Unique permit applications:', work['TrackingNumber'].nunique())
+    print('Coordinate groups:')
+    print(work['CoordinateGroup'].value_counts().to_string())
+    coordinate_qa(work)
+
+    # Checkpoints in THIS final output folder only; no old class decisions reused.
+    results = (pd.read_csv(RESULT_PATH, low_memory=False,
+                           dtype={'LocationID': 'string', 'TrackingNumber': 'string'})
+               .to_dict('records') if RESULT_PATH.exists() else [])
+    candidates = (pd.read_csv(CANDIDATE_PATH, low_memory=False,
+                              dtype={'LocationID': 'string'})
+                  .to_dict('records') if CANDIDATE_PATH.exists() else [])
+    input_ids = set(work['LocationID'].astype(str))
+    if not {str(r['LocationID']) for r in results}.issubset(input_ids):
+        raise ValueError('Saved results refer to another input dataset. Move the output folder '
+                         'before starting a new dataset.')
+    done = {str(r['LocationID']) for r in results if r.get('MatchStatus') != 'API_ERROR'}
+    print('Already completed:', len(done))
+    api_cache = SQLiteResponseCache(CACHE_DB_PATH)
+
+    def save_checkpoint():
+        save_csv(pd.DataFrame(results), RESULT_PATH)
+        evidence_frame = pd.DataFrame(candidates) if candidates else pd.DataFrame(
+            columns=['LocationID', 'CoordinateSource', 'LRS_SubBlockKey',
+                     'OfficialFHWAClass', 'EligibleAddressBlockClass'])
+        save_csv(evidence_frame, CANDIDATE_PATH)
 
     processed = 0
     errors_in_a_row = 0
@@ -730,57 +868,94 @@ def main():
             if lid in done:
                 continue
             try:
-                row, candidates = classify_location(rec)
+                outcome, evidence = classify_location(rec)
                 errors_in_a_row = 0
             except (requests.RequestException, ValueError, TypeError, KeyError,
                     RuntimeError, json.JSONDecodeError) as exc:
-                row = {'LocationID': rec['LocationID'],
-                       'TrackingNumber': rec.get('TrackingNumber'),
-                       'UtilityCompany': rec.get('UtilityCompany'),
-                       'WorkLocationFullAddress': rec.get('WorkLocationFullAddress'),
-                       'CoordinateGroup': rec['CoordinateGroup'],
-                       'FunctionalClass': None, 'ClassStatus': 'UNRESOLVED',
-                       'MatchStatus': 'API_ERROR', 'ClassReviewNeeded': True,
-                       'NeedsManualReview': True, 'Explanation': repr(exc)[:500]}
-                candidates = []
+                outcome = {'LocationID': rec['LocationID'],
+                           'TrackingNumber': rec.get('TrackingNumber'),
+                           'PermitNumber': rec.get('PermitNumber'),
+                           'UtilityCompany': rec.get('UtilityCompany'),
+                           'WorkLocationFullAddress': rec.get('WorkLocationFullAddress'),
+                           'CoordinateGroup': rec.get('CoordinateGroup'),
+                           'FunctionalClass': None, 'ClassStatus': 'UNRESOLVED',
+                           'MatchStatus': 'API_ERROR', 'ClassReviewNeeded': True,
+                           'SubBlockReviewNeeded': True, 'Explanation': str(exc)[:500]}
+                evidence = []
                 errors_in_a_row += 1
-                print(f'API/record error at LocationID {lid}: {row["Explanation"]}')
-            rows = [r for r in rows if str(r['LocationID']) != lid]
-            candidate_rows = [c for c in candidate_rows if str(c['LocationID']) != lid]
-            rows.append(row)
-            candidate_rows.extend(candidates)
+                print(f'Error for LocationID {lid}: {exc}')
+            results = [r for r in results if str(r['LocationID']) != lid]
+            candidates = [c for c in candidates if str(c['LocationID']) != lid]
+            results.append(outcome)
+            candidates.extend(evidence)
             processed += 1
             if processed % SAVE_EVERY == 0:
-                save()
-                print(f'Processed new locations: {processed} | saved: {len(rows)} / {len(work)}')
+                save_checkpoint()
+                print(f'Processed: {len(results):,} / {len(work):,}')
             if errors_in_a_row >= MAX_CONSECUTIVE_API_ERRORS:
-                print('STOPPED: several consecutive errors. Check the DDOT API/network, '
-                      'then rerun this script to resume.')
+                print('Stopped after repeated errors. Fix the service/network and rerun to resume.')
                 break
-        save()
+        save_checkpoint()
     finally:
         api_cache.close()
 
-    result_df = pd.DataFrame(rows)
-    if not result_df.empty:
-        review = result_df[result_df['ClassReviewNeeded'].astype(str).str.lower() == 'true']
-        write_csv_atomically(review, review_path)
-        write_csv_atomically(result_df[result_df['MatchStatus'] == 'API_ERROR'], errors_path)
-        print('\n--- DDOT LRS v2 MATCHING SUMMARY ---')
-        print('Records saved:', len(result_df), '/', len(work))
-        print(result_df['MatchStatus'].value_counts().to_string())
-        print('VERIFIED class:', int((result_df['ClassStatus'] == 'VERIFIED').sum()))
-        print('PROVISIONAL class:', int((result_df['ClassStatus'] == 'PROVISIONAL').sum()))
-        print('NO class:', int(result_df['FunctionalClass'].isna().sum()))
-        print('Class review required:', len(review))
-        print('Results:', results_path)
-        print('All candidate evidence:', candidate_path)
-        print('Class review list:', review_path)
-        if len(result_df) != len(work):
-            print('INCOMPLETE RUN: rerun with the SAME mode to resume remaining locations.')
-        else:
-            print('COMPLETE RUN: all selected locations have an output row.')
-    print('\nOnly ClassStatus=VERIFIED is a confirmed Functional Class.')
+    all_results = pd.DataFrame(results)
+    if all_results.empty:
+        print('No records processed.')
+        return
+    if all_results['LocationID'].astype(str).duplicated().any():
+        raise ValueError('Duplicate LocationID detected in final results.')
+    # Check that every verified class has supporting official candidate evidence.
+    evidence_df = pd.DataFrame(candidates)
+    if not evidence_df.empty:
+        supported = evidence_df.loc[
+            evidence_df['EligibleAddressBlockClass'].astype(str).str.lower().eq('true')
+            & evidence_df['OfficialFHWAClass'].notna(), ['LocationID', 'OfficialFHWAClass']].copy()
+        supported['OfficialFHWAClass'] = pd.to_numeric(supported['OfficialFHWAClass'], errors='coerce')
+        verified = all_results.loc[all_results['ClassStatus'].eq('VERIFIED'),
+                                   ['LocationID', 'FunctionalClass']].copy()
+        verified['FunctionalClass'] = pd.to_numeric(verified['FunctionalClass'], errors='coerce')
+        verified['LocationID'] = verified['LocationID'].astype(str)
+        supported['LocationID'] = supported['LocationID'].astype(str)
+        proof = verified.merge(supported, on='LocationID', how='left')
+        consistent = proof.loc[proof['FunctionalClass'].eq(proof['OfficialFHWAClass']), 'LocationID']
+        unsupported = sorted(set(verified['LocationID']) - set(consistent))
+        if unsupported:
+            raise ValueError(f'VERIFIED results without supporting candidate evidence: {unsupported[:10]}')
+
+    review = all_results.loc[
+        all_results['ClassReviewNeeded'].astype(str).str.lower().eq('true')].copy()
+    review['SuggestedNextAction'] = review['MatchStatus'].map(REVIEW_ACTIONS).fillna(
+        'Inspect LRS candidate evidence and original permit details.')
+    errors = all_results.loc[all_results['MatchStatus'].eq('API_ERROR')]
+    save_csv(review, REVIEW_PATH)
+    save_csv(errors, ERROR_PATH)
+    status_counts = all_results['MatchStatus'].value_counts(dropna=False).rename_axis('MatchStatus')
+    status_summary = status_counts.reset_index(name='NumberOfPermitLocations')
+    status_summary['PercentOfAllLocations'] = (100 * status_summary['NumberOfPermitLocations']
+                                                / len(work)).round(2)
+    save_csv(status_summary, SUMMARY_PATH)
+
+    verified_count = int(all_results['ClassStatus'].eq('VERIFIED').sum())
+    provisional_count = int(all_results['ClassStatus'].eq('PROVISIONAL').sum())
+    unclassified_count = int(all_results['FunctionalClass'].isna().sum())
+    print('\n--- FINAL ROADWAY MATCHING SUMMARY ---')
+    print('Records saved:', len(all_results), '/', len(work))
+    print(status_counts.to_string())
+    print('Verified classes:', verified_count)
+    print('Provisional classes:', provisional_count)
+    print('No assigned class:', unclassified_count)
+    print('Locations requiring class review:', len(review))
+    print('API errors:', len(errors))
+    if len(all_results) != len(work):
+        print('INCOMPLETE: rerun this script to resume remaining locations.')
+    else:
+        print('COMPLETE: every input LocationID has one output row.')
+    print('Main results:', RESULT_PATH)
+    print('Candidate evidence:', CANDIDATE_PATH)
+    print('Unresolved cases:', REVIEW_PATH)
+    print('Status summary:', SUMMARY_PATH)
+    print('Only ClassStatus=VERIFIED is a confirmed Functional Class.')
 
 
 if __name__ == '__main__':
