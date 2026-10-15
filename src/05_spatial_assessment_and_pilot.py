@@ -1,11 +1,16 @@
 # %% STEP 1 - Load the validated permit records
-"""Validate permit coordinates and test DDOT roadway candidates.
+# Purpose:
+# Load the validated permit locations from Step 04 and assess
+# the completeness and consistency of their spatial coordinates.
+# Check the coordinate reference systems and compare Original
+# (XCoord/YCoord) with OnSeg (OnSegX/OnSegY) coordinates.
+# Identify locations with different coordinates and measure
+# their separation without automatically excluding any records.
+# Select a small pilot sample from the three utility companies
+# and retrieve nearby roadway candidates from the DDOT GIS service.
+# Use these findings to guide roadway matching in Step 06.
+# Do not assign final FHWA functional classes in this step.
 
-Run from the VS Code Python Interactive window (using # %%) or:
-    python src/05_spatial_assessment_and_pilot.py
-
-This is a PILOT. It does NOT assign a final functional class.
-"""
 import json
 from pathlib import Path
 
@@ -19,7 +24,7 @@ INPUT = (
     ROOT / 'data' / 'processed'
     / 'permits_2026_applied_or_issued_staging_crane_three_utilities.json'
 )
-OUT = ROOT / 'outputs' / 'spatial'
+OUT = ROOT / 'outputs' / '2_spatial'
 OUT.mkdir(parents=True, exist_ok=True)
 
 with INPUT.open('r', encoding='utf-8') as f:

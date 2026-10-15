@@ -1,39 +1,28 @@
 # %% STEP 1 - Configuration and data conventions
-"""DDOT CS-12 | Step 07: Highest FHWA functional class per permit application.
-
-The DDOT Python assessment requires one row per individual permit location,
-including that location's road class and the highest road class for its permit.
-
-Input:  Step 06 FINAL output, with LocationID-level ClassStatus and FunctionalClass.
-Output: two primary CSVs and four separate documentation/QA CSVs.
-Pilot and full runs are kept separate within each output category.
-
-Important conventions:
-- TrackingNumber identifies the permit APPLICATION; one application may have
-  multiple LocationIDs. PermitNumber can be missing for applied permits.
-- FHWA class 1 is higher in functional hierarchy than classes 2-7. Therefore
-  the HIGHEST class for a permit is the MINIMUM numerical code.
-- A permit's highest class is CONFIRMED only when ALL of its locations have
-  ClassStatus='VERIFIED'. Provisional classes are never treated as verified.
-- Do not drop unverified locations or choose an arbitrary SubBlockKey.
-- This script does not modify Step 06 and makes NO web/API requests.
-
-Usage (Windows 11, from the repository root):
-    python src/07_calculate_highest_functional_class_per_permit.py
-
-Set RUN_MODE='pilot' first for the sample, then RUN_MODE='full'.
-Requires: pandas.
-"""
+# Purpose:
+# Use the roadway Functional Class results from Step 06 to determine
+# the highest FHWA Functional Class for each permit application.
+# Group all permit locations by TrackingNumber, since one application
+# may contain multiple LocationIDs and PermitNumber may be missing.
+# Identify the highest roadway class using the minimum numerical FHWA
+# class code (Class 1 is higher than Class 7).
+# Confirm the application-level result only when all associated
+# locations have VERIFIED classes; otherwise, flag it for review.
+# Preserve every location and attach the application-level result
+# to each location record.
+# Save the final location-level and application-level CSVs,
+# along with quality-control summaries and unresolved cases.
+# Keep pilot and full results separate without making new API requests.
 
 from pathlib import Path
 import pandas as pd
 
 RUN_MODE = 'full'  # 'pilot' or 'full'
 ROOT = Path(__file__).resolve().parent.parent
-STEP06_DIR = ROOT / 'outputs' / 'roadway_functional_class' / RUN_MODE
+STEP06_DIR = ROOT / 'outputs' / '3_roadway_functional_class' / RUN_MODE
 INPUT_CSV = STEP06_DIR / 'permit_locations_fhwa_functional_class.csv'
 STEP06_REVIEW_CSV = STEP06_DIR / 'permit_locations_functional_class_needing_review.csv'
-OUTPUT_ROOT = ROOT / 'outputs' / 'permit_highest_functional_class'
+OUTPUT_ROOT = ROOT / 'outputs' / '4_permit_highest_functional_class'
 PRIMARY_OUTPUT_DIR = OUTPUT_ROOT / '01_primary_results' / RUN_MODE
 DOCUMENTATION_OUTPUT_DIR = OUTPUT_ROOT / '02_quality_control_and_limitations' / RUN_MODE
 

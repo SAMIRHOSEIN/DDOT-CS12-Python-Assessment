@@ -1,10 +1,16 @@
-# %% 1. Import libraries and define the API
-
+# %% 
+# Purpose:
+# Use the activity names and date fields identified in Step 01
+# to download all TOPS permit locations applied for or issued in 2026
+# for Construction Staging Area and Mobile Crane Work Zone.
+# Retrieve data in batches and verify that all records are downloaded.
+# Do not filter by utility company yet, so Step 03 can examine
+# company-name variations before Step 04 applies the final company filter.
+# Preserve the original records for reproducibility and validation.
 import json
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import Counter
-
 import requests
 
 ROOT = (
@@ -34,7 +40,7 @@ def query_api(params):
         raise RuntimeError(result["error"])
 
     return result
-# %% 2. Define selection criteria
+# %% 2. Define selection criteria based on the instruction
 
 WHERE = """
 (
@@ -104,11 +110,9 @@ for start in range(0, len(object_ids), BATCH_SIZE):
 assert len(all_features) == len(object_ids)
 
 print("Download validation passed.")
-
-
 # %% 4. Save the downloaded dataset
 
-output_dir = ROOT / "data" / "raw"
+output_dir = ROOT / "data" / "2_raw"
 output_dir.mkdir(parents=True, exist_ok=True)
 
 output_path = output_dir / "permits_2026_applied_or_issued_staging_crane_all_companies.json"
@@ -129,10 +133,7 @@ with open(output_path, "w", encoding="utf-8") as f:
     json.dump(output_data, f, ensure_ascii=False, indent=2)
 
 print("File saved:", output_path)
-
-
 # %% 5. Verify activity types and permit counts
-
 records = [
     feature["attributes"]
     for feature in all_features

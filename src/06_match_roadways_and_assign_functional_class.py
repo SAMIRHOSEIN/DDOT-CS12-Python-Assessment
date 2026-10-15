@@ -1,21 +1,18 @@
-# %% STEP 1 - Settings and libraries
-"""DDOT CS-12 | Final roadway matching and FHWA functional class assignment.
+# %%
+# Purpose:
+# Use the validated permit locations from Step 04 and the coordinate
+# assessment from Step 05 to identify the correct roadway for each location.
+# Query the DDOT LRS service using Original and/or OnSeg coordinates
+# to retrieve nearby roadway candidates (75 m, expanding to 200 m if needed).
+# Compare candidate street names, address blocks, and nearest-road distances
+# with the original TOPS work-location address.
+# Retrieve official FHWA Functional Class values using SubBlockKey and
+# exclude alleys and invalid roadway matches.
+# Assign VERIFIED, PROVISIONAL, or UNRESOLVED status based on the evidence.
+# Save functional class results, candidate evidence, and review cases
+# for permit-level aggregation in Step 07.
 
-Run from the project with:
-    src/06_match_roadways_and_assign_functional_class.py
-    data/processed/permits_2026_applied_or_issued_staging_crane_three_utilities.json
-
-One row is evaluated per TOPS LocationID. For identical Original/OnSeg points,
-query OnSeg once; for different points, query both. LRS provides candidate
-SubBlockKeys and the official roadway layer provides FHWA functional classes.
-Street names, address ranges, road type and spatial agreement are checked.
-Uncertain results are RETAINED and clearly labeled, never silently discarded.
-
-Requirements: pandas, requests, pyproj. Run the full dataset with this script.
-TOPS XY is interpreted as EPSG:26985 based on earlier spatial QA; this is a
-working interpretation, not a confirmed TOPS metadata field definition.
-"""
-
+# STEP 1 - Settings and libraries
 import json
 import math
 import re
@@ -29,7 +26,7 @@ from pyproj import Transformer
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-RUN_MODE = 'full'  # 'pilot' or 'full'
+RUN_MODE = 'pilot'  # 'pilot' or 'full'
 PILOT_PER_COMPANY_PER_GROUP = 3
 
 LRS_SEARCH_RADII_METERS = (75, 200)  # Candidate search windows, NOT match thresholds.
@@ -39,8 +36,8 @@ MAX_CONSECUTIVE_API_ERRORS = 5
 IMPORT_EXISTING_RAW_API_CACHE = True  # Only raw API replies, never old match results.
 
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path.cwd()
-INPUT = ROOT / 'data' / 'processed' / 'permits_2026_applied_or_issued_staging_crane_three_utilities.json'
-BASE_OUT = ROOT / 'outputs' / 'roadway_functional_class'
+INPUT = ROOT / 'data' / '3_processed' / 'permits_2026_applied_or_issued_staging_crane_three_utilities.json'
+BASE_OUT = ROOT / 'outputs' / '3_roadway_functional_class'
 OUT = BASE_OUT / RUN_MODE
 CACHE_DB_PATH = BASE_OUT / 'ddot_lrs_raw_api_cache.sqlite3'
 

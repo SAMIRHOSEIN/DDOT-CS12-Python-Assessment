@@ -1,13 +1,32 @@
+# %% STEP 04 - Filter target utilities and validate permit records
+# Purpose:
+# Use the company-name findings from Step 03 to select permit locations
+# for DC Water, PEPCO, and Washington Gas using exact ApplicantCompany aliases.
+# Step 03 only prints exploratory results, so perform the essential
+# company-matching safety checks independently in this step.
+# Validate identifiers, application relationships, 2026 dates, and activities.
+# Print informative validation results, save the company inventory and QA
+# summary, and save detailed review CSVs only when issues are found.
+# Preserve source attributes and geometry in the filtered JSON for Steps 05-06.
 # %% STEP 1 - Load the full, date-and-activity-filtered dataset
 import json
-import re
 from pathlib import Path
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path.cwd()
-INPUT = ROOT / 'data' / 'raw' / 'permits_2026_applied_or_issued_staging_crane_all_companies.json'
-OUT = ROOT / 'outputs' / 'validation'
+INPUT = ROOT / 'data' / '2_raw' / 'permits_2026_applied_or_issued_staging_crane_all_companies.json'
+OUT = ROOT / 'outputs' / '1_validation'
 OUT.mkdir(parents=True, exist_ok=True)
+
+
+def save_review_if_nonempty(dataframe, filename):
+    # Avoid empty review files; remove an old file if a rerun has no findings.
+    path = OUT / filename
+    if dataframe.empty:
+        path.unlink(missing_ok=True)
+    else:
+        dataframe.to_csv(path, index=False)
+
 
 with INPUT.open('r', encoding='utf-8') as f:
     source = json.load(f)
@@ -59,7 +78,9 @@ company_inventory.to_csv(OUT / 'applicant_company_name_inventory.csv', index=Fal
 print('\nTop 25 ApplicantCompany names (including unmatched):')
 print(company_inventory.head(25).to_string(index=False))
 
-# %% STEP 3 - Check whether the other company fields reveal missed or conflicting records
+# %% STEP 3 - Essential safety check for missed or conflicting utility locations
+# Step 03 does the exploratory name review, but does not save results.
+# Recheck only the two inclusion risks needed to validate Step 04 selection.
 patterns = {
     'DC Water': r'\bDC\s*WATER\b|\bWASA\b',
     'PEPCO': r'\bPEPCO\b|\bPOTOMAC\s+ELECTRIC\b',
@@ -92,10 +113,9 @@ else:
     review = pd.DataFrame(columns=['OBJECTID', 'LocationID', 'TrackingNumber',
                                     'ApplicantCompany', 'PermitteeName', 'OwnerName',
                                     'UtilityCompany', 'suggested_by_other_field'])
-review.to_csv(OUT / 'company_matches_needing_review.csv', index=False)
+save_review_if_nonempty(review, 'company_matches_needing_review.csv')
 
 # %% STEP 4 - Validate identifiers and the relationship between applications and permits
-selected = df.loc[df['UtilityCompany'].notna()].copy()
 permit_numbers = df['PermitNumber'].astype('string').str.strip().replace('', pd.NA)
 tracking_numbers = df['TrackingNumber'].astype('string').str.strip().replace('', pd.NA)
 df['PermitNumber_clean'] = permit_numbers
@@ -109,7 +129,6 @@ company_per_tracking = (
 )
 mixed_company_ids = company_per_tracking[company_per_tracking > 1].index
 print('\nTrackingNumbers linked to more than one of the three target companies:', len(mixed_company_ids))
-
 
 
 # Check whether any non-target company records share a TrackingNumber
@@ -154,20 +173,21 @@ print(
 )
 
 print("\nApplicantCompany names in these records:")
-print(
-    shared_tracking_records["ApplicantCompany"]
-    .fillna("<NULL>")
-    .value_counts()
-    .head(20)
-    .to_string()
-)
+if shared_tracking_records.empty:
+    print("None.")
+else:
+    print(
+        shared_tracking_records["ApplicantCompany"]
+        .fillna("<NULL>")
+        .value_counts()
+        .head(20)
+        .to_string()
+    )
 
-# Save all flagged records for manual inspection.
-shared_tracking_records.drop(
-    columns=["TrackingNumber_clean"]
-).to_csv(
-    OUT / "non_target_locations_sharing_target_tracking.csv",
-    index=False
+# Save details only if excluded locations were found.
+save_review_if_nonempty(
+    shared_tracking_records.drop(columns=["TrackingNumber_clean"]),
+    'non_target_locations_sharing_target_tracking.csv'
 )
 
 if not shared_tracking_records.empty:
@@ -176,15 +196,12 @@ else:
     print("\nPASS: No non-target locations share target TrackingNumbers.")
 
 
-
 # A tracking number may have multiple permit numbers, and vice versa.
 links = df.dropna(subset=['TrackingNumber_clean', 'PermitNumber_clean'])
 permits_per_tracking = links.groupby('TrackingNumber_clean')['PermitNumber_clean'].nunique()
 trackings_per_permit = links.groupby('PermitNumber_clean')['TrackingNumber_clean'].nunique()
 print('TrackingNumbers linked to >1 PermitNumber:', int((permits_per_tracking > 1).sum()))
 print('PermitNumbers linked to >1 TrackingNumber:', int((trackings_per_permit > 1).sum()))
-
-
 
 
 # Check if the same TrackingNumber has both available and
@@ -229,18 +246,15 @@ print(
     len(mixed_permit_records)
 )
 
-# Save records for manual review
-mixed_permit_records.to_csv(
-    OUT / "mixed_missing_and_available_permit_numbers.csv",
-    index=False
+# Save details only if an application has mixed PermitNumber availability.
+save_review_if_nonempty(
+    mixed_permit_records, 'mixed_missing_and_available_permit_numbers.csv'
 )
 
 if len(mixed_permit_ids) == 0:
     print("PASS: No mixed PermitNumber availability found.")
 else:
     print("REVIEW: Some applications have both missing and available PermitNumbers.")
-
-
 
 
 # Export unusual relationships for manual inspection, without deleting records.
@@ -250,7 +264,7 @@ relationship_flags = selected.loc[
     | selected['PermitNumber_clean'].isin(trackings_per_permit[trackings_per_permit > 1].index),
     ['OBJECTID', 'LocationID', 'TrackingNumber', 'PermitNumber', 'UtilityCompany']
 ]
-relationship_flags.to_csv(OUT / 'identifier_relationships_needing_review.csv', index=False)
+save_review_if_nonempty(relationship_flags, 'identifier_relationships_needing_review.csv')
 
 # %% STEP 5 - Verify identifiers, date criteria, and activity types
 n_duplicate_objectids = int(df['OBJECTID'].duplicated().sum())
@@ -278,7 +292,7 @@ print('Missing PermitNumbers (selected):', n_missing_permit)
 print('Rows not matching 2026 date criterion (UTC interpretation):', int((~date_matches).sum()))
 print('Rows not matching two activity types:', int((~activity_matches).sum()))
 
-# %% STEP 6 - Save review files, summary, and the filtered records
+# %% STEP 6 - Save the validation summary and filtered permit records
 metrics = {
     'All downloaded location records': len(df),
     'Selected DC Water locations': int(selected['UtilityCompany'].eq('DC Water').sum()),
@@ -341,10 +355,14 @@ output = {
     'fields': fields,
     'features': filtered_features,
 }
-output_file = ROOT / 'data' / 'processed' / 'permits_2026_applied_or_issued_staging_crane_three_utilities.json'
+output_file = ROOT / 'data' / '3_processed' / 'permits_2026_applied_or_issued_staging_crane_three_utilities.json'
 output_file.parent.mkdir(parents=True, exist_ok=True)
 with output_file.open('w', encoding='utf-8') as f:
     json.dump(output, f, indent=2, ensure_ascii=False)
 print('\nFiltered permit-location dataset saved:', output_file)
 print('Validation summary:', OUT / 'permit_filter_validation_summary.csv')
-print('Review reports saved to:', OUT)
+review_files = sorted(path.name for path in OUT.glob('*_needing_review.csv'))
+review_files += sorted(path.name for path in OUT.glob('mixed_missing_and_available_permit_numbers.csv'))
+review_files += sorted(path.name for path in OUT.glob('non_target_locations_sharing_target_tracking.csv'))
+print('Company-name inventory:', OUT / 'applicant_company_name_inventory.csv')
+print('Non-empty review files:', ', '.join(review_files) if review_files else 'None needed')

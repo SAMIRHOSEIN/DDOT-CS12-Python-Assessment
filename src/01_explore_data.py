@@ -1,5 +1,11 @@
-# %% STEP 1 - Initial Schema Discovery (10 Unfiltered Records)
-
+#%%
+# Purpose:
+# Explore the DDOT TOPS dataset using small samples.
+# Identify available fields, exact permit activity names, company names,
+# and date fields needed for the assessment.
+# Use these findings to define the data extraction criteria in Step 02.
+# Do not filter utility companies yet; first examine how their names
+# appear in the source data.
 import json
 from pathlib import Path
 import pandas as pd
@@ -11,8 +17,9 @@ ROOT = (
     else Path.cwd()
 )
 #%%
+# STEP 1 - Initial Schema Discovery (10 Unfiltered Records)
 # Load the original unfiltered sample
-file_10 = ROOT / "data" / "samples" / "sample_10_unfiltered_schema_discovery.json"
+file_10 = ROOT / "data" / "1_samples" / "sample_10_unfiltered_schema_discovery.json"
 
 with open(file_10, "r", encoding="utf-8") as f:
     raw_10 = json.load(f)
@@ -57,12 +64,10 @@ print("Number of unique locations:",
 
 print("\nCoordinate system:",
       raw_10["spatialReference"])
-
-
 # %% STEP 2 - Data Profiling (500 Date-Filtered Records)
 
 file_500 = (
-    ROOT / "data" / "samples"
+    ROOT / "data" / "1_samples"
     / "sample_500_date_filtered_2026_company_activity_exploration.json"
 )
 
@@ -121,4 +126,3 @@ print(
     .head(25)
     .to_string()
 )
-

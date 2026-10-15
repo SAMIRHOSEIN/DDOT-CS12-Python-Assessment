@@ -1,5 +1,11 @@
+# %% STEP 03 - Explore utility company names (no files saved)
+# Purpose:
+# Read the complete 2026 date/activity dataset downloaded in Step 02.
+# Explore how DC Water, PEPCO, and Washington Gas appear in
+# ApplicantCompany, PermitteeName, and OwnerName.
+# Print name variations, match counts, and possible additional locations.
+# Use these findings to choose exact ApplicantCompany aliases in Step 04.
 # %% STEP 1 - Load Complete Permit Dataset
-
 import json
 from pathlib import Path
 import pandas as pd
@@ -7,7 +13,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 
 file_path = (
-    ROOT / "data" / "raw"
+    ROOT / "data" / "2_raw"
     / "permits_2026_applied_or_issued_staging_crane_all_companies.json"
 )
 
@@ -21,9 +27,7 @@ df = pd.DataFrame(
 print("Total locations:", len(df))
 print("Unique applications:", df["TrackingNumber"].nunique())
 
-
 # %% STEP 2 - Discover Utility Company Names
-
 company_columns = [
     "ApplicantCompany",
     "PermitteeName",
@@ -82,10 +86,13 @@ for utility, pattern in patterns.items():
           other_columns_only.sum())
 
     print("\nApplicantCompany values for those cases:")
-    print(
-        df.loc[other_columns_only, "ApplicantCompany"]
-        .fillna("<NULL>")
-        .value_counts()
-        .head(15)
-        .to_string()
-    )
+    if other_columns_only.any():
+        print(
+            df.loc[other_columns_only, "ApplicantCompany"]
+            .fillna("<NULL>")
+            .value_counts()
+            .head(15)
+            .to_string()
+        )
+    else:
+        print("None. All suggested locations also matched ApplicantCompany.")
