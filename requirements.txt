@@ -1,0 +1,15 @@
+# DDOT CS-12 Python assessment: Python 3.11 recommended.
+# Ranges are installation constraints, NOT a freeze of the original environment.
+
+# Runtime packages imported by src/01 through src/07
+numpy>=1.26,<3.0
+pandas>=2.2,<3.0
+requests>=2.31,<3.0
+urllib3>=1.26,<3.0  # imported directly for HTTP retry configuration
+pyproj>=3.6,<4.0
+
+# VS Code Python Interactive support for # %% cells (not required for CLI scripts)
+ipykernel>=6.29,<7.0
+
+# Optional developer testing support; no automated test suite is shipped yet.
+pytest>=8.0,<10.0
