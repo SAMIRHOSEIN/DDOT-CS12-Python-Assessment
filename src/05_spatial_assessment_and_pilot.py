@@ -21,7 +21,7 @@ from pyproj import Transformer
 
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path.cwd()
 INPUT = (
-    ROOT / 'data' / 'processed'
+    ROOT / 'data' / '3_processed'
     / 'permits_2026_applied_or_issued_staging_crane_three_utilities.json'
 )
 OUT = ROOT / 'outputs' / '2_spatial'

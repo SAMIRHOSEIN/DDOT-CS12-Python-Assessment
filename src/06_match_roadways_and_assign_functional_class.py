@@ -26,7 +26,7 @@ from pyproj import Transformer
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-RUN_MODE = 'pilot'  # 'pilot' or 'full'
+RUN_MODE = 'full'  # 'pilot' or 'full'
 PILOT_PER_COMPANY_PER_GROUP = 3
 
 LRS_SEARCH_RADII_METERS = (75, 200)  # Candidate search windows, NOT match thresholds.
