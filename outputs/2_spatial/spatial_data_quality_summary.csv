@@ -1,0 +1,11 @@
+Check,Count
+Total selected permit records,5048
+Records with valid Longitude and Latitude,5048
+Records missing/invalid Longitude or Latitude,0
+Records with EPSG:3857 point geometry,5048
+Records missing EPSG:3857 point geometry,0
+Records with comparable Longitude/Latitude and ArcGIS geometry,5048
+Records with OnSegX and OnSegY,5048
+Records with any numerical difference between Original and OnSeg,535
+Records missing RoadwaySegID,5048
+Records with missing or zero StreetSegID,5048

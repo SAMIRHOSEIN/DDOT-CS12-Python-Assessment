@@ -1,0 +1,10 @@
+﻿Metric,Count
+Permit locations in Step 06 input,5048
+Unique permit applications (TrackingNumber),3171
+Verified permit locations,4874
+Provisional permit locations,120
+Unresolved permit locations,54
+Permits with confirmed highest class,3000
+Permits with verified and unverified locations,16
+Permits with no verified locations,155
+Permits needing review,171

@@ -1,0 +1,26 @@
+Check,Count
+All downloaded location records,7314
+Selected DC Water locations,1937
+Selected PEPCO locations,1397
+Selected Washington Gas locations,1714
+Total selected location records,5048
+Unclassified location records,2266
+Selected unique TrackingNumbers,3171
+Selected unique nonmissing PermitNumbers,1548
+Duplicate OBJECTIDs,0
+Repeated non-null LocationIDs,0
+Missing LocationIDs,0
+Missing TrackingNumbers in selected records,0
+Missing PermitNumbers in selected records,2580
+TrackingNumbers associated with multiple target utilities,0
+TrackingNumbers with multiple PermitNumbers,0
+PermitNumbers with multiple TrackingNumbers,0
+Rows not matching date criterion under UTC,0
+Rows with unexpected permit activity,0
+TrackingNumbers with mixed PermitNumber availability,0
+DC Water: other fields but not ApplicantCompany,0
+DC Water: conflicting utility name,0
+PEPCO: other fields but not ApplicantCompany,0
+PEPCO: conflicting utility name,0
+Washington Gas: other fields but not ApplicantCompany,0
+Washington Gas: conflicting utility name,0
